@@ -73,6 +73,7 @@ test("Zulip deployment is opt-in and production-only", () => {
     ZULIP_CHANNEL_ID: "12",
     ZULIP_BOT_EMAIL: "bot@example.test",
     ZULIP_API_KEY: "key",
+    DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/123/test-token",
   };
   const c = { vars: {} as Record<string, string> };
   configureDeployment(c, "staging", env);
@@ -80,6 +81,27 @@ test("Zulip deployment is opt-in and production-only", () => {
   configureDeployment(c, "production", env);
   assert.equal(c.vars.ZULIP_ENABLED, "true");
   assert.equal(c.vars.ZULIP_API_KEY, undefined);
+  assert.equal(c.vars.DISCORD_WEBHOOK_URL, undefined);
+  assert.equal(c.vars.ZULIP_FAILURE_WEBHOOK_URL, undefined);
+  for (const webhook of [
+    "",
+    "invalid-secret",
+    "https://other.example/api/webhooks/123/secret",
+    "https://user:secret@discord.com/api/webhooks/123/token",
+  ]) {
+    assert.throws(
+      () =>
+        configureDeployment(c, "production", {
+          ...env,
+          DISCORD_WEBHOOK_URL: webhook,
+        }),
+      /^Error: Configure DISCORD_WEBHOOK_URL for Zulip failure alerts\.$/,
+    );
+  }
+
+  assert.throws(() =>
+    configureDeployment(c, "production", { ...env, DISCORD_WEBHOOK_URL: "" }),
+  );
   assert.throws(() =>
     configureDeployment(c, "production", { ...env, ZULIP_API_KEY: "" }),
   );

@@ -1,3 +1,5 @@
+import { deliveryCheckEvent } from "./zulip-checks";
+import { failureAlertEvent, enqueueFailureAlert } from "./zulip-failures";
 import { Env, now, uid, stmt, one, batch } from "./core";
 
 export function zulipEnabled(env: Env) {
@@ -11,6 +13,8 @@ export function zulipEvent(
   byKey = false,
 ): D1PreparedStatement[] {
   if (!zulipEnabled(env)) return [];
+  const eventId = uid();
+  const createdAt = now();
   const ref = byKey ? "(SELECT id FROM reports WHERE create_key=?)" : "?";
   return [
     stmt(
@@ -18,13 +22,14 @@ export function zulipEvent(
       `INSERT INTO outbox_events(id,type,aggregate_id,dedupe_key,payload,created_at)
      SELECT ?,'zulip',CAST(target AS TEXT),? || CAST(target AS TEXT) || ?,?,?
      FROM (SELECT ${ref} target)`,
-      uid(),
+      eventId,
       `zulip:${kind}:`,
       kind === "report" ? `:${revision}` : "",
       JSON.stringify({ kind, revision }),
-      now(),
+      createdAt,
       id,
     ),
+    deliveryCheckEvent(env, eventId, createdAt),
   ];
 }
 // Inline code suppresses Zulip Markdown and mention interpretation.
@@ -103,8 +108,25 @@ export async function deliverZulip(env: Env, event: any) {
       old.status === "sending" &&
       old.lease_until <= now() &&
       old.attempts >= 8
-    )
-      await finish("failed");
+    ) {
+      await batch(db, [
+        stmt(
+          db,
+          "UPDATE zulip_deliveries SET status='failed',lease_until=NULL,last_error='lease_expired' WHERE event_id=? AND status='sending' AND lease_until<=? AND attempts>=8",
+          event.id,
+          now(),
+        ),
+        stmt(
+          db,
+          "UPDATE outbox_events SET completed_at=? WHERE id=? AND EXISTS(SELECT 1 FROM zulip_deliveries WHERE event_id=? AND status='failed')",
+          now(),
+          event.id,
+          event.id,
+        ),
+        failureAlertEvent(env, event.id),
+      ]);
+      await enqueueFailureAlert(env, event.id);
+    }
     return;
   }
   let error = "configuration",
@@ -134,7 +156,8 @@ export async function deliverZulip(env: Env, event: any) {
     try {
       response = await fetch(new URL("/api/v1/messages", site), {
         method: "POST",
-        redirect: "error",
+        // Workers supports manual/follow only; reject 3xx below without forwarding credentials.
+        redirect: "manual",
         signal: AbortSignal.timeout(15000),
         headers: {
           Authorization: `Basic ${btoa(`${env.ZULIP_BOT_EMAIL}:${env.ZULIP_API_KEY}`)}`,
@@ -207,6 +230,7 @@ export async function deliverZulip(env: Env, event: any) {
       ),
       ...(status === "failed"
         ? [
+            failureAlertEvent(env, event.id),
             stmt(
               db,
               "UPDATE outbox_events SET completed_at=? WHERE id=?",
@@ -224,5 +248,6 @@ export async function deliverZulip(env: Env, event: any) {
         error,
       }),
     );
+    if (status === "failed") await enqueueFailureAlert(env, event.id);
   }
 }

@@ -47,3 +47,65 @@ Only retry after inspecting the target topic for an already-delivered message.
 The next scheduled dispatch will enqueue the event. Hidden reports and deleted
 or hidden comments are cancelled at send time. Existing sent messages are not
 removed when content is subsequently hidden or deleted.
+
+## Failure alerts on Discord
+
+When a Zulip delivery reaches `failed` (a permanent error, eight attempts, or an
+expired final delivery lease), the same D1 transaction records a separate
+`zulip_failure` outbox event. The queue is notified immediately; the existing
+outbox dispatcher recovers failed enqueue attempts. Transient Zulip failures that
+are still being retried do not trigger a failure alert, but are checked once at
+15 minutes as described below. Cancelled deliveries never trigger alerts.
+
+Production reuses the GitHub `DISCORD_WEBHOOK_URL` secret used by deployment
+notifications. The workflow installs it as Worker secret
+`ZULIP_FAILURE_WEBHOOK_URL`. Enabling production Zulip now requires this webhook,
+validated before provisioning. It must be an HTTPS `discord.com/api/webhooks/...`
+URL without a query or fragment. Staging never sends these alerts.
+
+Alerts include the source event ID, report link, revision (for report events),
+attempt count and sanitized error code. They omit report/comment bodies, bot
+credentials and webhook URLs; Discord mentions are disabled. Alerts still send
+if Zulip is subsequently disabled. A retry or recovery of the source delivery
+before the alert is processed cancels the obsolete alert when it no longer
+meets the alert condition (a failure alert requires `failed`; a delayed alert
+requires an unsent, non-cancelled delivery).
+
+Each source event has one durable alert. Alert delivery uses its own lease and
+retry state, independently of the original failed Zulip delivery. Discord 429,
+5xx, network and malformed-success responses retry with exponential backoff and
+respect `Retry-After`, up to eight attempts. Redirects are never followed. The
+existing dispatcher recovers pending alert events; retry timing can be later
+than the minimum backoff. An ambiguous response or crash after Discord accepts a
+message can still cause a duplicate.
+
+Inspect `alert_attempts`, `alert_sent_at`, `alert_error`, `alert_lease_until` and
+`alert_next_attempt_at` on `zulip_deliveries`, alongside the `zulip_failure`
+outbox event. Alert delivery failures produce sanitized `zulip_alert_retry` or
+`zulip_alert_failed` error logs. Already-completed historical failures are not
+backfilled by this migration.
+
+## One delayed check after 15 minutes
+
+Each new Zulip event creates a `zulip_check` outbox event in the same publication
+transaction. Its deadline is the source event creation time plus 15 minutes.
+The dispatcher submits it with Cloudflare Queues `delaySeconds` set to the
+remaining time (initially 900 seconds). An already-scheduled check is not
+resubmitted by the five-minute dispatcher while waiting for its deadline.
+
+At the deadline, the queue consumer checks the delivery once. A pending,
+retrying or sending delivery, including an event whose delivery never started,
+creates a Discord alert headed `Zulip delivery still unsent after 15 minutes`.
+A failed delivery uses the existing failure alert. Both conditions share one
+alert per source event, so a delayed alert followed by permanent failure does
+not produce another notification. The original Zulip delivery keeps its own
+retry schedule and may still succeed later.
+
+Sent/cancelled deliveries, hidden reports, deleted/hidden comments and disabled
+Zulip integrations are skipped. If delivery succeeds before the Discord alert
+is sent, the obsolete alert is cancelled. The check does not repeatedly inspect
+an unsent event every five minutes. Queue delivery can occur later than its
+deadline; early delivery is retried for the remaining delay. The durable outbox
+recovers failed enqueue attempts, and can redrive an overdue uncompleted check
+after the normal ten-minute recovery grace period. Duplicate queue deliveries
+are harmless after the check completes. Historical events are not backfilled.

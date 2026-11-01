@@ -4913,11 +4913,18 @@ test("Zulip announcements: transactional events, idempotency, retries and visibi
     )
     .all();
   assert.equal(events.length, 3);
+  assert.equal(
+    db
+      .prepare("SELECT COUNT(*) n FROM outbox_events WHERE type='zulip_check'")
+      .get()!.n,
+    3,
+  );
   const original = globalThis.fetch;
   const messages: URLSearchParams[] = [];
   let status = 200;
   globalThis.fetch = (async (_url: any, init: any) => {
     assert.match(init.headers.Authorization, /^Basic /);
+    assert.equal(init.redirect, "manual");
     messages.push(init.body);
     return new Response(JSON.stringify({ result: "success", id: 99 }), {
       status,
@@ -4941,6 +4948,14 @@ test("Zulip announcements: transactional events, idempotency, retries and visibi
     db.prepare(
       "UPDATE zulip_deliveries SET next_attempt_at=NULL WHERE event_id=?",
     ).run(events[1].id as string);
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) n FROM outbox_events WHERE type='zulip_failure'",
+        )
+        .get()!.n,
+      0,
+    );
     status = 200;
     await deliverZulip(env, events[1]);
     const { queue } = await import("../src/jobs");
@@ -4999,9 +5014,13 @@ test("Zulip leases, retry limits, permanent errors and rollback", async () => {
   const original = globalThis.fetch;
   let calls = 0;
   let status = 503;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (_url: any, init: any) => {
+    assert.equal(init.redirect, "manual");
     calls++;
-    return new Response("{}", { status });
+    return new Response("{}", {
+      status,
+      headers: { Location: "https://other.example/messages" },
+    });
   }) as typeof fetch;
   try {
     db.prepare(
@@ -5031,6 +5050,28 @@ test("Zulip leases, retry limits, permanent errors and rollback", async () => {
       db.prepare("SELECT attempts FROM zulip_deliveries").get()!.attempts,
       1,
     );
+    // Redirects are permanent failures, never followed with the bot credentials.
+    for (const redirectStatus of [301, 302, 303, 307, 308]) {
+      db.prepare(
+        "UPDATE zulip_deliveries SET status='pending',attempts=0,next_attempt_at=NULL",
+      ).run();
+      db.prepare("UPDATE outbox_events SET completed_at=NULL WHERE id=?").run(
+        event.id as string,
+      );
+      status = redirectStatus;
+      const beforeCalls: number = calls;
+      await deliverZulip(env, event);
+      assert.equal(calls, beforeCalls + 1);
+      const delivery = db.prepare("SELECT * FROM zulip_deliveries").get()!;
+      assert.equal(delivery.status, "failed");
+      assert.equal(delivery.last_error, `http_${redirectStatus}`);
+      assert.equal(delivery.attempts, 1);
+      assert.ok(
+        db
+          .prepare("SELECT completed_at FROM outbox_events WHERE id=?")
+          .get(event.id as string)!.completed_at,
+      );
+    }
     const before = db.prepare("SELECT COUNT(*) n FROM reports").get()!.n;
     db.exec(
       "CREATE TRIGGER reject_zulip BEFORE INSERT ON outbox_events WHEN NEW.type='zulip' BEGIN SELECT RAISE(ABORT,'test rollback'); END",
