@@ -40,6 +40,21 @@ export function configureDeployment(config, target, env) {
     if (!/^[1-9]\d*$/.test(config.vars.ZULIP_CHANNEL_ID))
       throw Error("Invalid ZULIP_CHANNEL_ID.");
     if (!env.ZULIP_API_KEY?.trim()) throw Error("Missing ZULIP_API_KEY.");
+    let webhook;
+    try {
+      webhook = new URL(env.DISCORD_WEBHOOK_URL || "");
+    } catch {
+      throw Error("Configure DISCORD_WEBHOOK_URL for Zulip failure alerts.");
+    }
+    if (
+      webhook.origin !== "https://discord.com" ||
+      webhook.username ||
+      webhook.password ||
+      !/^\/api\/webhooks\/\d+\/[\w-]+$/.test(webhook.pathname) ||
+      webhook.search ||
+      webhook.hash
+    )
+      throw Error("Configure DISCORD_WEBHOOK_URL for Zulip failure alerts.");
   }
   config.workers_dev = !customDomain;
   if (target === "production") config.preview_urls = false;

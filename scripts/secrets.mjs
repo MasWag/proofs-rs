@@ -24,6 +24,9 @@ if (process.env.CLOUDFLARE_D1_TOKEN)
 if (target === "production" && config.vars.ZULIP_ENABLED === "true") {
   if (!process.env.ZULIP_API_KEY) throw Error("Missing ZULIP_API_KEY");
   values.ZULIP_API_KEY = process.env.ZULIP_API_KEY;
+  if (!process.env.DISCORD_WEBHOOK_URL)
+    throw Error("Missing DISCORD_WEBHOOK_URL");
+  values.ZULIP_FAILURE_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 }
 for (const [name, text] of Object.entries(values)) {
   const response = await fetch(endpoint, {

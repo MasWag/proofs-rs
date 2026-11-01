@@ -1,3 +1,5 @@
+import { checkZulipDelivery, deliveryCheckDelay } from "./zulip-checks";
+import { deliverFailureAlert } from "./zulip-failures";
 import { deliverZulip } from "./zulip";
 import { Env, now, uid, one, rows, stmt, batch, signToken } from "./core";
 import { importJob } from "./imports";
@@ -5,11 +7,20 @@ export async function dispatch(env: Env) {
   const db = env.DB;
   const events = await rows(
     db,
-    "SELECT id FROM outbox_events WHERE completed_at IS NULL AND (enqueued_at IS NULL OR enqueued_at<?) ORDER BY created_at LIMIT 40",
+    `SELECT id,type,payload FROM outbox_events WHERE completed_at IS NULL
+      AND (enqueued_at IS NULL OR (enqueued_at<? AND
+        (type!='zulip_check' OR json_extract(payload,'$.due_at')<?)))
+      ORDER BY created_at LIMIT 40`,
+    new Date(Date.now() - 600000).toISOString(),
     new Date(Date.now() - 600000).toISOString(),
   );
   for (const e of events) {
-    await env.JOBS.send({ event_id: e.id });
+    await env.JOBS.send(
+      { event_id: e.id },
+      e.type === "zulip_check"
+        ? { delaySeconds: deliveryCheckDelay(e) }
+        : undefined,
+    );
     await stmt(
       db,
       "UPDATE outbox_events SET enqueued_at=? WHERE id=?",
@@ -340,6 +351,14 @@ export async function queue(batchMessages: MessageBatch<any>, env: Env) {
                 event.id,
               ).run();
           } else if (event.type === "zulip") await deliverZulip(env, event);
+          else if (event.type === "zulip_check") {
+            const delay = await checkZulipDelivery(env, event);
+            if (delay) {
+              m.retry({ delaySeconds: delay });
+              continue;
+            }
+          } else if (event.type === "zulip_failure")
+            await deliverFailureAlert(env, event);
           else if (event.type === "comment")
             await createNotifications(env, event);
         }

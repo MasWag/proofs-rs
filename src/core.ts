@@ -6,6 +6,7 @@ export interface Env {
   ZULIP_CHANNEL_ID?: string;
   ZULIP_BOT_EMAIL?: string;
   ZULIP_API_KEY?: string;
+  ZULIP_FAILURE_WEBHOOK_URL?: string;
   DB: D1Database;
   ARCHIVE: R2Bucket;
   JOBS: Queue;
