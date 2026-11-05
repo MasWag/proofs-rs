@@ -139,7 +139,7 @@ export function quota(
 ) {
   return stmt(
     db,
-    "INSERT INTO rate_limits VALUES(?,?,?,1,?) ON CONFLICT(subject,kind,bucket) DO UPDATE SET used=used+1",
+    "INSERT INTO rate_limits VALUES(?,?,?,1,?) ON CONFLICT(subject,kind,bucket) DO UPDATE SET used=used+1,lim=excluded.lim",
     subject,
     kind,
     now().slice(0, 10),

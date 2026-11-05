@@ -412,7 +412,7 @@ runs.post(
     });
     try {
       await batch(c.env.DB, [
-        quota(c.env.DB, u.id, "verification_run", 90),
+        quota(c.env.DB, u.id, "verification_run", 900),
         stmt(
           c.env.DB,
           "INSERT INTO verification_runs(id,author_id,crate,version,tool_version_id,sha256,size,r2_key,created_at,toolchain_json) VALUES(?,?,?,?,?,?,?,?,?,?)",

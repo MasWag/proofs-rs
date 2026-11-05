@@ -999,7 +999,7 @@ api.post(
       v = await validate(c, b);
     await idempotent(c, "report", b, "pending", async (key) => [
       activeGuard(c),
-      quota(c.env.DB, u.id, "report", 20),
+      quota(c.env.DB, u.id, "report", 200),
       stmt(
         c.env.DB,
         "INSERT INTO reports(create_key,release_id,author_id,created_at,updated_at) VALUES(?,?,?,?,?)",
@@ -1069,7 +1069,7 @@ api.post(
         p.id,
         u.id,
       ),
-      quota(c.env.DB, u.id, "report", 20),
+      quota(c.env.DB, u.id, "report", 200),
       ...revisionStatements(c, v, p.id, n),
       ...zulipEvent(c.env, "report", p.id, n),
       stmt(c.env.DB, "UPDATE reports SET updated_at=? WHERE id=?", now(), p.id),
@@ -1286,7 +1286,7 @@ api.post(
         "EXISTS(SELECT 1 FROM reports WHERE id=? AND visibility='public')",
         q.id,
       ),
-      quota(c.env.DB, u.id, "comment", 100),
+      quota(c.env.DB, u.id, "comment", 1000),
       stmt(
         c.env.DB,
         "INSERT INTO report_comments(id,report_id,sequence_no,revision_no,author_id,reply_to_id,body,created_at) SELECT ?,?,COALESCE(MAX(sequence_no),0)+1,?,?,?,?,? FROM report_comments WHERE report_id=?",

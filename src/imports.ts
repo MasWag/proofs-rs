@@ -753,12 +753,12 @@ importRoutes.post(
           u.id,
           c.env.TERMS_VERSION,
         ),
-        quota(db, u.id, "import", 5),
+        quota(db, u.id, "import", 50),
         quota(
           db,
           await hash(c.req.header("cf-connecting-ip") || u.id),
           "import_ip",
-          50,
+          500,
         ),
         stmt(
           db,

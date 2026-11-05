@@ -348,7 +348,7 @@ findings.post(
           p.id,
           p.revision_no,
         ),
-        quota(c.env.DB, requireUser(c).id, "finding", 100),
+        quota(c.env.DB, requireUser(c).id, "finding", 1000),
         ...findingStatements(c, input, p.id, p.revision_no, false, candidate),
       ],
     );
@@ -460,7 +460,7 @@ findings.post(
       async () => [
         ...versionGuard(c, f, b.edit_version),
         ...ss,
-        quota(c.env.DB, requireUser(c).id, "finding_link", 200),
+        quota(c.env.DB, requireUser(c).id, "finding_link", 2000),
         stmt(
           c.env.DB,
           "INSERT INTO finding_links VALUES(?,?,?,?,?,?,?,?,NULL)",
