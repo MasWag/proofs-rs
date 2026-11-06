@@ -565,6 +565,199 @@ test("docs.rs hex 0.4.3 format 60 imports codec APIs and associated types", () =
   );
 });
 
+test("docs.rs lexical-parse-integer 1.0.6 format 56 imports available APIs and reports missing reexports", () => {
+  // Trimmed from docs.rs /crate/lexical-parse-integer/1.0.6/json.gz:
+  // preserve index/inner and referenced paths, remove prose and unrelated paths.
+  const doc = JSON.parse(
+    readFileSync(
+      new URL(
+        "../fixtures/lexical-parse-integer-1.0.6-rustdoc-56.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.throws(
+    () => extractAPIs(doc, "lexical-parse-integer", "1.0.6"),
+    /unresolved_public_reexport/,
+  );
+  const warnings: { path: string; id: string; reason: string }[] = [];
+  const metadata = new Map<string, any>();
+  const apis = extractAPIs(
+    doc,
+    "lexical-parse-integer",
+    "1.0.6",
+    metadata,
+    warnings as any,
+  );
+  assert.equal(apis.length, 96);
+  assert.equal(warnings.length, 8);
+  assert.deepEqual(
+    warnings.find((w) => w.path === "lexical_parse_integer::FromLexical"),
+    {
+      path: "lexical_parse_integer::FromLexical",
+      id: "187",
+      reason: "missing_reexport_target",
+    },
+  );
+  assert.equal(
+    apis.find((a) => a.canonical_key === "lexical_parse_integer::Options::new")
+      ?.signature,
+    "impl Options\npub const fn new() -> Self",
+  );
+  assert.equal(
+    apis.find(
+      (a) => a.canonical_key === "lexical_parse_integer::OptionsBuilder::build",
+    )?.signature,
+    "impl OptionsBuilder\npub const fn build(self: &Self) -> Result<Options>",
+  );
+  assert.equal(
+    metadata.get("lexical_parse_integer::OptionsBuilder::build")?.category,
+    "method",
+  );
+  assert.ok(!apis.some((a) => a.canonical_key.includes("FromLexical")));
+  for (const invalidId of [undefined, null, -1, {}, false]) {
+    const malformed = structuredClone(doc);
+    malformed.index[204].inner.use.id = invalidId;
+    assert.throws(
+      () =>
+        extractAPIs(malformed, "lexical-parse-integer", "1.0.6", undefined, []),
+      /unresolved_public_reexport/,
+    );
+  }
+  assert.throws(
+    () =>
+      extractAPIs(
+        {
+          ...doc,
+          index: {
+            ...doc.index,
+            [doc.root]: {
+              ...doc.index[doc.root],
+              inner: { module: { items: [999999] } },
+            },
+          },
+        },
+        "lexical-parse-integer",
+        "1.0.6",
+        undefined,
+        [],
+      ),
+    /unresolved_public_reexport/,
+  );
+  assert.throws(
+    () =>
+      extractAPIs(
+        { ...doc, format_version: 57 },
+        "lexical-parse-integer",
+        "1.0.6",
+        undefined,
+        [],
+      ),
+    /unsupported_rustdoc_format/,
+  );
+});
+
+test("format 56 partial catalog stays explicit through import, API resolution, and refresh", async (t) => {
+  const { db, env, request } = await fixture();
+  const raw = readFileSync(
+    new URL(
+      "../fixtures/lexical-parse-integer-1.0.6-rustdoc-56.json",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  db.exec(
+    "DELETE FROM api_items; DELETE FROM doc_snapshots; UPDATE crates SET name='lexical-parse-integer' WHERE id=1; UPDATE releases SET version='1.0.6' WHERE id=1; INSERT INTO import_jobs(id,release_id,status,created_at) VALUES('format56',1,'pending','2026-11-07T00:00:00.000Z')",
+  );
+  const objects = new Map<string, string>();
+  env.ARCHIVE = {
+    put: async (key: string, value: string) => {
+      objects.set(key, value);
+    },
+    get: async (key: string) => {
+      const value = objects.get(key);
+      return value === undefined ? null : { text: async () => value };
+    },
+  } as any;
+  t.mock.method(globalThis, "fetch", async (input: any) => {
+    const url = String(input);
+    if (url.startsWith("https://crates.io/"))
+      return Response.json({
+        version: { num: "1.0.6", checksum: "checksum", yanked: false },
+      });
+    if (url.startsWith("https://docs.rs/")) return new Response(raw);
+    throw Error("Unexpected request: " + url);
+  });
+  assert.equal(await importJob(env, "format56"), true);
+  const status = await request("/imports/format56");
+  assert.equal(status.body.status, "ready");
+  assert.equal(status.body.catalog_warnings.length, 8);
+  const prepared = await request("/publish/prepare", "POST", {
+    crate: "lexical-parse-integer",
+    version: "1.0.6",
+  });
+  assert.equal(prepared.body.status, "ready");
+  assert.deepEqual(
+    prepared.body.catalog_warnings,
+    status.body.catalog_warnings,
+  );
+  const list = await request("/crates/lexical-parse-integer/1.0.6/apis");
+  assert.equal(list.body.items.length, 96);
+  assert.deepEqual(list.body.catalog_warnings, status.body.catalog_warnings);
+  const found = await request(
+    "/resolve-api?crate=lexical-parse-integer&version=1.0.6&path=lexical_parse_integer::OptionsBuilder::build",
+  );
+  assert.equal(found.status, 200);
+  const detail = await request(`/apis/${found.body.id}`);
+  assert.match(detail.body.signature, /pub const fn build\(self: &Self\)/);
+  assert.equal(detail.body.catalog_warnings.length, 8);
+  const absent = await request(
+    "/resolve-api?crate=lexical-parse-integer&version=1.0.6&path=lexical_parse_integer::FromLexical::from_lexical",
+  );
+  assert.equal(absent.status, 404);
+  const page = await app.request(
+    "https://example.test/crate/lexical-parse-integer?version=1.0.6",
+    {},
+    env,
+  );
+  assert.match(await page.text(), /Documentation import is incomplete/);
+  const refreshed = await refreshCatalog(env, 1);
+  assert.equal(refreshed.indexed, 96);
+  assert.equal(refreshed.catalog_warnings?.length, 8);
+  assert.equal(
+    JSON.parse(
+      db
+        .prepare(
+          "SELECT catalog_warnings_json FROM doc_snapshots WHERE release_id=1",
+        )
+        .get()!.catalog_warnings_json as string,
+    ).length,
+    8,
+  );
+  const key = db
+    .prepare("SELECT r2_key FROM doc_snapshots WHERE release_id=1")
+    .get()!.r2_key as string;
+  const complete = JSON.parse(raw);
+  const missingUseIds = new Set([195, 197, 199, 201, 202, 203, 204, 205]);
+  complete.index[complete.root].inner.module.items = complete.index[
+    complete.root
+  ].inner.module.items.filter((id: number) => !missingUseIds.has(id));
+  objects.set(key, JSON.stringify(complete));
+  const clean = await refreshCatalog(env, 1);
+  assert.equal(clean.catalog_warnings, undefined);
+  assert.deepEqual(
+    JSON.parse(
+      db
+        .prepare(
+          "SELECT catalog_warnings_json FROM doc_snapshots WHERE release_id=1",
+        )
+        .get()!.catalog_warnings_json as string,
+    ),
+    [],
+  );
+});
+
 test("catalog refresh adds concrete trait methods without changing existing API IDs", async () => {
   const { db, env } = await fixture();
   const fn = {
@@ -1981,6 +2174,72 @@ function traitImplFixture(selfType: any): any {
     },
   };
 }
+
+test("format 56 preserves trait method identities and signatures shared with newer formats", () => {
+  const doc = traitImplFixture({ primitive: "u64" });
+  doc.index[2].inner.function.sig = {
+    inputs: [
+      [
+        "bytes",
+        {
+          borrowed_ref: {
+            lifetime: null,
+            is_mutable: false,
+            type: { slice: { primitive: "u8" } },
+          },
+        },
+      ],
+    ],
+    output: {
+      resolved_path: {
+        path: "Result",
+        args: { angle_bracketed: { args: [{ type: { primitive: "u64" } }] } },
+      },
+    },
+  };
+  doc.index[4].inner.function.sig = structuredClone(
+    doc.index[2].inner.function.sig,
+  );
+  const outputs = [56, 60, 61].map((format_version) => {
+    const metadata = new Map<string, any>();
+    const apis = extractAPIs(
+      { ...doc, format_version },
+      "sample",
+      "1.0.0",
+      metadata,
+    );
+    return { apis, metadata: [...metadata] };
+  });
+  assert.deepEqual(outputs[0], outputs[1]);
+  assert.deepEqual(outputs[1], outputs[2]);
+  assert.deepEqual(
+    outputs[0].apis.map((a) => a.canonical_key),
+    ["sample::T::m", "<u64 as sample::T>::m"],
+  );
+  assert.match(outputs[0].apis[0].signature, /bytes: &\[u8\]\) -> Result<u64>/);
+  const missing = {
+    ...doc,
+    index: {
+      ...doc.index,
+      1: {
+        ...doc.index[1],
+        inner: { use: { id: 999, name: "Absent", is_glob: false } },
+      },
+    },
+  };
+  for (const format_version of [60, 61])
+    assert.throws(
+      () =>
+        extractAPIs(
+          { ...missing, format_version },
+          "sample",
+          "1.0.0",
+          undefined,
+          [],
+        ),
+      /unresolved_public_reexport/,
+    );
+});
 
 test("trait traversal preserves legacy entries and all public aliases without duplicates", () => {
   const doc = traitImplFixture({ resolved_path: { path: "S", id: 5 } });

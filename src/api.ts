@@ -438,7 +438,7 @@ api.get(
         method_name: S.nullableString,
         is_blanket: S.flag.nullable(),
       }),
-    ),
+    ).extend({ catalog_warnings: S.z.array(S.catalogWarning) }),
     {
       tags: ["Crates"],
       auth: "optional",
@@ -458,9 +458,16 @@ api.get(
       c.req.param("version"),
       "%" + (c.req.query("q") || "") + "%",
     );
+    const snapshot = await one(
+      c.env.DB,
+      "SELECT ds.catalog_warnings_json FROM doc_snapshots ds JOIN releases rel ON rel.id=ds.release_id JOIN crates cr ON cr.id=rel.crate_id WHERE cr.name=? AND rel.version=?",
+      c.req.param("name"),
+      c.req.param("version"),
+    );
     return c.json({
       items: items.map(apiObservation),
       next_cursor: null,
+      catalog_warnings: JSON.parse(snapshot?.catalog_warnings_json || "[]"),
     });
   },
 );
@@ -492,11 +499,16 @@ api.get(
   async (c) => {
     const item = await one(
       c.env.DB,
-      `SELECT a.*,${apiOrigin()} origin,cr.name crate,rel.version,rel.yanked,ds.target,ds.features_json,ds.rustdoc_format FROM api_items a JOIN releases rel ON rel.id=a.release_id JOIN crates cr ON cr.id=rel.crate_id LEFT JOIN doc_snapshots ds ON ds.release_id=rel.id WHERE a.id=? AND ${visibleAPI()}`,
+      `SELECT a.*,${apiOrigin()} origin,cr.name crate,rel.version,rel.yanked,ds.target,ds.features_json,ds.rustdoc_format,ds.catalog_warnings_json FROM api_items a JOIN releases rel ON rel.id=a.release_id JOIN crates cr ON cr.id=rel.crate_id LEFT JOIN doc_snapshots ds ON ds.release_id=rel.id WHERE a.id=? AND ${visibleAPI()}`,
       c.req.param("id"),
     );
     if (!item) throw new Fault(404, "api_not_found");
-    return c.json(apiObservation(item));
+    const observed = apiObservation(item);
+    const { catalog_warnings_json: _, ...apiItem } = observed;
+    return c.json({
+      ...apiItem,
+      catalog_warnings: JSON.parse(item.catalog_warnings_json || "[]"),
+    });
   },
 );
 api.get(
