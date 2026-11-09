@@ -39,6 +39,11 @@ export const reportFilters = search.extend({
 });
 export const list = <T extends z.ZodType>(item: T) =>
   z.object({ items: z.array(item), next_cursor: string.nullable() });
+export const catalogWarning = z.object({
+  path: string,
+  id: string,
+  reason: z.literal("missing_reexport_target"),
+});
 export const token = z.object({
   id: string,
   created_at: string,
@@ -118,6 +123,7 @@ export const apiDetail = apiItem.extend({
   target: nullableString,
   features_json: nullableString,
   rustdoc_format: integer.nullable(),
+  catalog_warnings: z.array(catalogWarning),
 });
 export const toolVersion = z
   .object({

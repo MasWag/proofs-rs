@@ -42,11 +42,13 @@ try {
         `Archived rustdoc hash mismatch for ${release.name} ${release.version}`,
       );
     const metadata = new Map();
+    const catalogWarnings = [];
     const apis = extractAPIs(
       JSON.parse(raw),
       release.name,
       release.version,
       metadata,
+      catalogWarnings,
     );
     const before = query(
       `SELECT COUNT(*) AS total FROM api_items WHERE release_id=${Number(release.release_id)}`,
@@ -85,8 +87,11 @@ INSERT INTO api_item_metadata SELECT id,${fields} FROM api_items WHERE release_i
     const after = query(
       `SELECT COUNT(*) AS total FROM api_items WHERE release_id=${Number(release.release_id)}`,
     )[0].total;
+    query(
+      `UPDATE doc_snapshots SET catalog_warnings_json=${quote(JSON.stringify(catalogWarnings))} WHERE release_id=${Number(release.release_id)}`,
+    );
     console.log(
-      `${release.name} ${release.version}: ${after - before} added, ${after} total`,
+      `${release.name} ${release.version}: ${after - before} added, ${after} total${catalogWarnings.length ? `, ${catalogWarnings.length} unresolved public exports` : ""}`,
     );
   }
 } finally {

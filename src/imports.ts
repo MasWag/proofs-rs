@@ -19,10 +19,15 @@ import {
   text,
   hash,
 } from "./core";
-// Format 60 is still served by docs.rs for releases such as hex 0.4.3.
-export const FORMATS = [60, 61];
+// docs.rs still serves older rustdoc formats for pinned crate releases.
+export const FORMATS = [56, 60, 61];
 // Bump when extraction or metadata changes require replaying archived rustdoc.
-export const CATALOG_EXTRACTOR_VERSION = 2;
+export const CATALOG_EXTRACTOR_VERSION = 3;
+export type CatalogWarning = {
+  path: string;
+  id: string;
+  reason: "missing_reexport_target";
+};
 
 function markCatalogCurrent(db: D1Database, releaseId: number) {
   return stmt(
@@ -267,6 +272,7 @@ export function extractAPIs(
   crate: string,
   version: string,
   metadata?: Map<string, any>,
+  catalogWarnings?: CatalogWarning[],
 ) {
   if (!FORMATS.includes(doc.format_version))
     throw new Fault(422, "unsupported_rustdoc_format");
@@ -404,6 +410,16 @@ export function extractAPIs(
       throw new Fault(422, "api_graph_too_large");
     const item = index[id];
     if (!item) {
+      // Format 56 may omit even public reexport targets from both index and
+      // paths. Do not invent their signatures; report this incomplete catalog.
+      if (doc.format_version === 56 && alias && catalogWarnings) {
+        catalogWarnings.push({
+          path: [...path, alias].join("::"),
+          id: String(id),
+          reason: "missing_reexport_target",
+        });
+        return;
+      }
       throw new Fault(422, "unresolved_public_reexport");
     }
     if (seen.has(String(id))) return;
@@ -414,7 +430,16 @@ export function extractAPIs(
     const name = alias || item.name;
     const current = id === doc.root ? [rootName] : [...path, name];
     if (inner.use) {
-      if (inner.use.id === null)
+      if (
+        (!(
+          typeof inner.use.id === "number" &&
+          Number.isSafeInteger(inner.use.id) &&
+          inner.use.id >= 0
+        ) &&
+          !(typeof inner.use.id === "string" && inner.use.id.length > 0)) ||
+        typeof inner.use.name !== "string" ||
+        !inner.use.name
+      )
         throw new Fault(422, "unresolved_public_reexport");
       if (inner.use.is_glob) {
         const target = index[inner.use.id];
@@ -634,11 +659,13 @@ export async function refreshCatalog(env: Env, releaseId: number) {
   const object = await env.ARCHIVE.get(snapshot.r2_key);
   if (!object) throw new Fault(502, "snapshot_missing");
   const metadata = new Map<string, any>();
+  const catalogWarnings: CatalogWarning[] = [];
   const apis = extractAPIs(
     JSON.parse(await object.text()),
     snapshot.name,
     snapshot.version,
     metadata,
+    catalogWarnings,
   );
   let added = 0;
   for (let i = 0; i < apis.length; i += 50) {
@@ -667,8 +694,20 @@ export async function refreshCatalog(env: Env, releaseId: number) {
   }
   await promoteImportedAPIs(env.DB, releaseId, apis);
   await saveMetadata(env.DB, releaseId, metadata);
-  await markCatalogCurrent(env.DB, releaseId).run();
-  return { indexed: apis.length, added };
+  await batch(env.DB, [
+    stmt(
+      env.DB,
+      "UPDATE doc_snapshots SET catalog_warnings_json=? WHERE release_id=?",
+      JSON.stringify(catalogWarnings),
+      releaseId,
+    ),
+    markCatalogCurrent(env.DB, releaseId),
+  ]);
+  return {
+    indexed: apis.length,
+    added,
+    ...(catalogWarnings.length ? { catalog_warnings: catalogWarnings } : {}),
+  };
 }
 importRoutes.post(
   "/publish/prepare",
@@ -678,6 +717,15 @@ importRoutes.post(
       status: S.z.literal("ready"),
       crate: S.string,
       version: S.string,
+      catalog_warnings: S.z
+        .array(
+          S.z.object({
+            path: S.string,
+            id: S.string,
+            reason: S.z.literal("missing_reexport_target"),
+          }),
+        )
+        .optional(),
     }),
     {
       tags: ["Imports"],
@@ -736,8 +784,19 @@ importRoutes.post(
       name,
       version,
     );
-    if (await catalogCurrent(db, rel.id))
-      return c.json({ status: "ready", crate: name, version });
+    if (await catalogCurrent(db, rel.id)) {
+      const snapshot = await one(
+        db,
+        "SELECT catalog_warnings_json FROM doc_snapshots WHERE release_id=?",
+        rel.id,
+      );
+      return c.json({
+        status: "ready",
+        crate: name,
+        version,
+        catalog_warnings: JSON.parse(snapshot?.catalog_warnings_json || "[]"),
+      });
+    }
     const running = await one(
       db,
       "SELECT id,status FROM import_jobs WHERE release_id=? AND status IN ('pending','running','retry')",
@@ -802,6 +861,7 @@ importRoutes.get(
       error_code: S.nullableString,
       crate: S.string,
       version: S.string,
+      catalog_warnings: S.z.array(S.catalogWarning),
     }),
     { tags: ["Imports"], auth: "user", errors: [404] },
   ),
@@ -809,11 +869,15 @@ importRoutes.get(
     requireUser(c);
     const job = await one(
       c.env.DB,
-      "SELECT j.id,j.status,j.error_code,cr.name crate,r.version FROM import_jobs j JOIN releases r ON r.id=j.release_id JOIN crates cr ON cr.id=r.crate_id WHERE j.id=?",
+      "SELECT j.id,j.status,j.error_code,cr.name crate,r.version,s.catalog_warnings_json FROM import_jobs j JOIN releases r ON r.id=j.release_id JOIN crates cr ON cr.id=r.crate_id LEFT JOIN doc_snapshots s ON s.release_id=r.id WHERE j.id=?",
       c.req.param("id"),
     );
     if (!job) throw new Fault(404, "import_not_found");
-    return c.json(job);
+    const { catalog_warnings_json: _, ...status } = job;
+    return c.json({
+      ...status,
+      catalog_warnings: JSON.parse(job.catalog_warnings_json || "[]"),
+    });
   },
 );
 export async function importJob(env: Env, id: string) {
@@ -877,9 +941,10 @@ export async function importJob(env: Env, id: string) {
         30 * 1024 * 1024,
       );
     const metadata = new Map<string, any>();
+    const catalogWarnings: CatalogWarning[] = [];
     const raw = new TextDecoder().decode(bytes),
       doc = JSON.parse(raw),
-      apis = extractAPIs(doc, rel.name, rel.version, metadata),
+      apis = extractAPIs(doc, rel.name, rel.version, metadata, catalogWarnings),
       digest = await hash(raw),
       r2key = `rustdoc/${rel.name}/${rel.version}/${digest}.json`;
     await env.ARCHIVE.put(r2key, raw, {
@@ -912,7 +977,7 @@ export async function importJob(env: Env, id: string) {
     await batch(db, [
       stmt(
         db,
-        "INSERT INTO doc_snapshots VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+        "INSERT INTO doc_snapshots(release_id,target,features_json,rustdoc_format,rustc_version,source_url,source_hash,r2_key,imported_at,catalog_warnings_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
         rel.id,
         typeof doc.target === "string"
           ? doc.target
@@ -924,6 +989,7 @@ export async function importJob(env: Env, id: string) {
         digest,
         r2key,
         now(),
+        JSON.stringify(catalogWarnings),
       ),
       markCatalogCurrent(db, rel.id),
       ...(typeof meta.version.description === "string"

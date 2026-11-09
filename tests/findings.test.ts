@@ -1214,6 +1214,12 @@ test("body migration preserves origin, links, APIs and immutable history without
       "utf8",
     ),
   );
+  db.exec(
+    readFileSync(
+      new URL("../migrations/0018_catalog_warnings.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   // Submit the actual rendered form, including unchanged migrated prose.
   const page = await app.request(
     `https://example.test/finding/legacy`,

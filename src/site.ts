@@ -420,6 +420,9 @@ export async function sitePage(c: Ctx, fetch: SiteFetch): Promise<Response> {
       const claimedAPIs = apis.items.filter(
         (a: any) => a.claim_count > 0,
       ).length;
+      const catalogWarning = apis.catalog_warnings?.length
+        ? `<p class="warning"><strong>Documentation import is incomplete.</strong> ${apis.catalog_warnings.length} public export${apis.catalog_warnings.length === 1 ? "" : "s"} could not be resolved in the upstream rustdoc JSON: ${apis.catalog_warnings.map((w: any) => `<code>${esc(w.path)}</code>`).join(", ")}. APIs missing from that JSON cannot be mapped from documentation. Counts cover catalogued APIs only.</p>`
+        : "";
       // Same visibility and validity rules as the Findings count below.
       const findingsByAPI = new Map(
         (
@@ -471,7 +474,7 @@ export async function sitePage(c: Ctx, fetch: SiteFetch): Promise<Response> {
       );
       return result(
         `${id} ${version}`,
-        `${breadcrumbs([{ label: "crates", href: "/crates" }])}<h1>${esc(id)} ${esc(version)}</h1>${badge}${releases.description ? `<p>${esc(releases.description)}</p>` : ""}<p><a href="https://crates.io/crates/${enc(id)}/${enc(version)}" target="_blank" rel="noopener noreferrer">crates.io</a></p><form method="get" action="/crate/${enc(id)}" data-version-selector><label>Version <select name="version" aria-label="Version">${releases.items.map((r: any) => `<option value="${esc(r.version)}"${r.version === version ? " selected" : ""}>${esc(r.version)}${r.yanked ? " (yanked)" : ""}</option>`).join("")}</select></label></form><nav class="filterbar" aria-label="Sections for version ${esc(version)}"><a href="#reports">${counts[0].n} report${counts[0].n === 1 ? "" : "s"}</a> · <a href="#findings">${findingCount[0].n} finding${findingCount[0].n === 1 ? "" : "s"}</a> · <a href="#apis">${claimedAPIs} of ${apis.items.length} catalogued API${apis.items.length === 1 ? "" : "s"} with claims</a></nav><h2 id="reports">Reports (${counts[0].n})</h2>${reports}${findingSection}<h2 id="apis">APIs (${apis.items.length})</h2><p class="meta">APIs are imported from documentation or named in published verification records. ${claimedAPIs} ${claimedAPIs === 1 ? "has" : "have"} at least one claim; a count says nothing about how strong each claim is.</p><form class="api-filter" data-api-filter hidden><input type="search" aria-label="Filter APIs" placeholder="Filter APIs"><label><input type="checkbox" name="claimed"> With claims</label><label><input type="checkbox" name="found"> With findings</label><span role="status" class="meta"></span></form>${renderAPICatalog(apis.items, id)}`,
+        `${breadcrumbs([{ label: "crates", href: "/crates" }])}<h1>${esc(id)} ${esc(version)}</h1>${badge}${releases.description ? `<p>${esc(releases.description)}</p>` : ""}<p><a href="https://crates.io/crates/${enc(id)}/${enc(version)}" target="_blank" rel="noopener noreferrer">crates.io</a></p><form method="get" action="/crate/${enc(id)}" data-version-selector><label>Version <select name="version" aria-label="Version">${releases.items.map((r: any) => `<option value="${esc(r.version)}"${r.version === version ? " selected" : ""}>${esc(r.version)}${r.yanked ? " (yanked)" : ""}</option>`).join("")}</select></label></form>${catalogWarning}<nav class="filterbar" aria-label="Sections for version ${esc(version)}"><a href="#reports">${counts[0].n} report${counts[0].n === 1 ? "" : "s"}</a> · <a href="#findings">${findingCount[0].n} finding${findingCount[0].n === 1 ? "" : "s"}</a> · <a href="#apis">${claimedAPIs} of ${apis.items.length} catalogued API${apis.items.length === 1 ? "" : "s"} with claims</a></nav><h2 id="reports">Reports (${counts[0].n})</h2>${reports}${findingSection}<h2 id="apis">APIs (${apis.items.length})</h2><p class="meta">APIs are imported from documentation or named in published verification records. ${claimedAPIs} ${claimedAPIs === 1 ? "has" : "have"} at least one claim; a count says nothing about how strong each claim is.</p><form class="api-filter" data-api-filter hidden><input type="search" aria-label="Filter APIs" placeholder="Filter APIs"><label><input type="checkbox" name="claimed"> With claims</label><label><input type="checkbox" name="found"> With findings</label><span role="status" class="meta"></span></form>${renderAPICatalog(apis.items, id)}`,
       );
     }
     if (p === "api" && id) {
@@ -943,7 +946,7 @@ export async function sitePage(c: Ctx, fetch: SiteFetch): Promise<Response> {
       const data = await get("/admin/catalogs");
       return result(
         "Catalogs",
-        `<h1>Catalogs</h1><p>Reindex stored rustdoc snapshots to include all public callable APIs. Existing API IDs and claims are preserved.</p><ul>${data.items.map((item: any) => `<li>${esc(item.crate)} ${esc(item.version)} ${action("refresh", { id: item.id }, "Refresh")}</li>`).join("")}</ul>`,
+        `<h1>Catalogs</h1><p>Reindex stored rustdoc snapshots to include available public callable APIs. Existing API IDs and claims are preserved.</p><ul>${data.items.map((item: any) => `<li>${esc(item.crate)} ${esc(item.version)} ${action("refresh", { id: item.id }, "Refresh")}</li>`).join("")}</ul>`,
       );
     }
     return result("Page not found", "<h1>Page not found</h1>", 404);
@@ -1164,7 +1167,7 @@ export async function siteAction(c: Ctx, fetch: SiteFetch): Promise<Response> {
           ? '<h1>CLI connected</h1><p>Return to your terminal to continue. You can close this page.</p><a href="/settings">Manage tokens</a>'
           : name === "unsubscribe"
             ? "<h1>Unsubscribed</h1><p>You can re-enable notifications in your account settings.</p>"
-            : `<h1>Catalog refreshed</h1><p>${escape(value.indexed)} indexed, ${escape(value.added)} added</p><a href="/admin/catalogs">Catalogs</a>`,
+            : `<h1>Catalog refreshed</h1><p>${escape(value.indexed)} indexed, ${escape(value.added)} added${value.catalog_warnings?.length ? `; ${escape(value.catalog_warnings.length)} unresolved public exports` : ""}</p><a href="/admin/catalogs">Catalogs</a>`,
       ),
     );
   if (name === "signup") back = safeBack(value.return_to);
