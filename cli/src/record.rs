@@ -980,7 +980,7 @@ fn creusot_results(
     ensure!(!results.is_empty(),"No fresh Creusot proof.json results could be mapped to source APIs. Run the prover (not compilation only); unsupported proof layouts are rejected");
     Ok((results, verified))
 }
-// Creusot 0.13 emits methods under impl_Type / impl_Trait_for_Type rather
+// Creusot 0.13+ emits methods under impl_Type / impl_Trait_for_Type rather
 // than their source paths. Use the generated declaration span, not the lossy
 // directory name, to distinguish same-named methods and external trait aliases.
 fn creusot_span_matches(root: &Path, proof: &Path, contract: &Contract) -> bool {
@@ -1037,11 +1037,13 @@ fn proved(v: &Value) -> bool {
     if v.get("prover").and_then(Value::as_str).is_some() {
         return true;
     }
+    // why3find marks a tactic complete when no child is stuck, so a tactic that
+    // leaves no subgoals (e.g. Creusot 0.14's compute_specified) is proved.
     if v.get("tactic").and_then(Value::as_str).is_some() {
         return v
             .get("children")
             .and_then(Value::as_array)
-            .is_some_and(|children| !children.is_empty() && children.iter().all(proved));
+            .is_some_and(|children| children.iter().all(proved));
     }
     if let Some(o) = v.as_object() {
         return !o.is_empty()
@@ -1384,6 +1386,22 @@ mod tests {
         );
         assert!(creusot_results(d.path(), &proof_files(d.path()).unwrap(), &[contract()]).is_err());
     }
+    #[test]
+    fn creusot_0_14_sessions_accept_tactics_without_subgoals() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("verif/demo/check_f/proof.json");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(
+            &p,
+            r#"{"profile":[],"proofs":{"Coma":{"vc_f":{"prover":"alt-ergo","time":0.005},"vc_f'0":{"tactic":"compute_specified","children":[]}}}}"#,
+        )
+        .unwrap();
+        let (results, verified) =
+            creusot_results(d.path(), &BTreeMap::new(), &[contract()]).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r["kind"] == "pass"));
+        assert_eq!(verified.len(), 1);
+    }
 
     #[test]
     fn preserves_qualified_trait_api_paths() {
@@ -1396,11 +1414,18 @@ mod tests {
 
     #[test]
     fn native_why3find_tactic_requires_all_children_proved() {
-        let pass = json!({"tactic":"split_vc","children":[{"prover":"z3","time":0.1},{"tactic":"split_vc","children":[{"prover":"cvc5","time":0.1}]}]});
-        assert!(proved(&pass));
+        for pass in [
+            json!({"tactic":"split_vc","children":[{"prover":"z3","time":0.1},{"tactic":"split_vc","children":[{"prover":"cvc5","time":0.1}]}]}),
+            json!({"tactic":"compute_specified","children":[]}),
+            json!({"tactic":"split_vc","children":[{"tactic":"compute_specified","children":[]}]}),
+        ] {
+            assert!(proved(&pass));
+        }
         for fail in [
             json!({"tactic":"split_vc","children":[{"prover":"z3"},{}]}),
-            json!({"tactic":"split_vc","children":[]}),
+            json!({"tactic":"split_vc","children":[{"prover":"z3"},null]}),
+            json!({"tactic":"compute_specified","children":[null]}),
+            json!(null),
             json!({"tactic":"split_vc"}),
             json!({"children":[{}]}),
         ] {
